@@ -25,13 +25,23 @@ headers = {
     "Referer": "https://site.cff.org.br/farmaceutico/pesquisa"
 }
 
-# Dicionário de UFs para o mapa do IBGE
 UF_CODES = {
     'AC': 12, 'AL': 27, 'AP': 16, 'AM': 13, 'BA': 29, 'CE': 23, 'DF': 53,
     'ES': 32, 'GO': 52, 'MA': 21, 'MT': 51, 'MS': 50, 'MG': 31, 'PA': 15,
     'PB': 25, 'PR': 41, 'PE': 26, 'PI': 22, 'RJ': 33, 'RN': 24, 'RS': 43,
     'RO': 11, 'RR': 14, 'SC': 42, 'SP': 35, 'SE': 28, 'TO': 17
 }
+
+# ---------------- CACHE DO MAPA (BAIXA SÓ 1 VEZ) ----------------
+@st.cache_data(show_spinner=False)
+def carregar_mapa_ibge():
+    try:
+        resp = requests.get("https://raw.githubusercontent.com/kelvins/Municipios-Brasileiros/main/json/municipios.json", timeout=15)
+        if resp.status_code == 200:
+            return resp.json()
+        return None
+    except:
+        return None
 
 # ---------------- FUNÇÕES DE DISTÂNCIA E ORDENAÇÃO ----------------
 def remover_acentos(txt):
@@ -48,47 +58,52 @@ def ordenar_cidades_por_distancia(lista_cidades, estado_sigla, cidade_referencia
     if not cidade_referencia:
         return lista_cidades, []
         
-    ui_status.info(f"🗺️ Mapeando coordenadas em um raio a partir de '{cidade_referencia.upper()}'...")
     cidade_ref_norm = remover_acentos(cidade_referencia)
     codigo_alvo = UF_CODES.get(estado_sigla.upper())
     
-    try:
-        resp = requests.get("https://raw.githubusercontent.com/kelvins/Municipios-Brasileiros/main/json/municipios.json", timeout=15)
-        if resp.status_code != 200:
-            return lista_cidades, []
+    # Busca os dados cacheados em vez de fazer download novamente
+    dados_municipios = carregar_mapa_ibge()
+    
+    if not dados_municipios:
+        ui_status.error("❌ Erro ao baixar o mapa de distâncias do IBGE (Bloqueio de Servidor). Indo por Ordem Alfabética.")
+        time.sleep(3)
+        return lista_cidades, []
+
+    mapa_coordenadas = {}
+    lat_alvo, lon_alvo = None, None
+    cidade_encontrada_mapa = ""
+
+    for mun in dados_municipios:
+        if mun["codigo_uf"] == codigo_alvo:
+            nome_norm = remover_acentos(mun["nome"])
+            mapa_coordenadas[nome_norm] = (mun["latitude"], mun["longitude"])
             
-        dados_municipios = resp.json()
-        mapa_coordenadas = {}
-        lat_alvo, lon_alvo = None, None
+            if nome_norm == cidade_ref_norm or cidade_ref_norm in nome_norm:
+                lat_alvo, lon_alvo = mun["latitude"], mun["longitude"]
+                cidade_encontrada_mapa = nome_norm
 
-        for mun in dados_municipios:
-            if mun["codigo_uf"] == codigo_alvo:
-                nome_norm = remover_acentos(mun["nome"])
-                mapa_coordenadas[nome_norm] = (mun["latitude"], mun["longitude"])
-                if nome_norm == cidade_ref_norm:
-                    lat_alvo, lon_alvo = mun["latitude"], mun["longitude"]
+    if lat_alvo is not None and lon_alvo is not None:
+        cidades_com_distancia = []
+        cidades_sem_coordenada = []
 
-        if lat_alvo is not None and lon_alvo is not None:
-            cidades_com_distancia = []
-            cidades_sem_coordenada = []
+        for c in lista_cidades:
+            c_norm = remover_acentos(c)
+            if c_norm in mapa_coordenadas:
+                lat_c, lon_c = mapa_coordenadas[c_norm]
+                dist = calcular_distancia_km(lat_alvo, lon_alvo, lat_c, lon_c)
+                cidades_com_distancia.append((c, dist))
+            else:
+                cidades_sem_coordenada.append(c)
 
-            for c in lista_cidades:
-                c_norm = remover_acentos(c)
-                if c_norm in mapa_coordenadas:
-                    lat_c, lon_c = mapa_coordenadas[c_norm]
-                    dist = calcular_distancia_km(lat_alvo, lon_alvo, lat_c, lon_c)
-                    cidades_com_distancia.append((c, dist))
-                else:
-                    cidades_sem_coordenada.append(c)
-
-            cidades_com_distancia.sort(key=lambda x: x[1])
-            nova_lista = [item[0] for item in cidades_com_distancia] + cidades_sem_coordenada
-            top_5 = [f"{item[0]} ({round(item[1], 1)} km)" for item in cidades_com_distancia[:5]]
-            
-            return nova_lista, top_5
-        else:
-            return lista_cidades, []
-    except:
+        cidades_com_distancia.sort(key=lambda x: x[1])
+        nova_lista = [item[0] for item in cidades_com_distancia] + cidades_sem_coordenada
+        top_5 = [f"{item[0]} ({round(item[1], 1)} km)" for item in cidades_com_distancia[:5]]
+        
+        ui_status.success(f"📍 **Rota Traçada (Base: {cidade_encontrada_mapa})!**\n\n*Próximas paradas:* {', '.join(top_5)}...")
+        return nova_lista, top_5
+    else:
+        ui_status.warning(f"⚠️ A cidade '{cidade_referencia}' não foi encontrada no mapa do IBGE. Verifique a digitação. Iniciando varredura por Ordem Alfabética.")
+        time.sleep(3)
         return lista_cidades, []
 
 # ---------------- FUNÇÕES DE APOIO ----------------
@@ -123,7 +138,7 @@ def resolver_captcha(caminho_imagem):
     except: return None
 
 # ---------------- MOTOR PRINCIPAL ----------------
-def buscar_profissional_por_raio(nome_pesquisa, estado_sigla, cidade_referencia, ui_status):
+def buscar_profissional_por_raio(nome_pesquisa, estado_sigla, cidade_referencia, ui_status, ui_alerts):
     caminho_json = os.path.join("ufs_json", f"{estado_sigla.upper()}.json")
     if not os.path.exists(caminho_json):
         return None, f"Erro: Arquivo {estado_sigla.upper()}.json não encontrado na pasta ufs_json."
@@ -133,28 +148,22 @@ def buscar_profissional_por_raio(nome_pesquisa, estado_sigla, cidade_referencia,
     
     lista_cidades = [c["NomeCidade"].replace("'", '') for c in cidades_json]
     
-    # Reordena a lista usando a matemática de coordenadas
     lista_cidades, top_5 = ordenar_cidades_por_distancia(lista_cidades, estado_sigla, cidade_referencia, ui_status)
     
-    if top_5:
-        ui_status.success(f"📍 **Rota Traçada!** Buscando a partir de {cidade_referencia.upper()}.\n\n*Próximas paradas:* {', '.join(top_5)}...")
-
     session = requests.Session()
     session.verify = False
     session.headers.update(headers)
     caminho_img_temp = "captcha_raio_temp.png"
 
-    # Barra de progresso para a equipe ver que o robô não travou
     progress_bar = st.progress(0)
     total_cidades = len(lista_cidades)
 
     for i, cidade in enumerate(lista_cidades):
-        # Atualiza a interface
         progress_bar.progress((i + 1) / total_cidades)
         ui_status.info(f"🔎 Varrendo cidade: **{cidade.upper()}** ({i+1}/{total_cidades})...")
         
         tentativa_atual = 0
-        sucesso_busca = False
+        encontrou_profissional = False
         soup_resultado = None
 
         while tentativa_atual < 5:
@@ -183,25 +192,39 @@ def buscar_profissional_por_raio(nome_pesquisa, estado_sigla, cidade_referencia,
 
                 payload = {'_token': token, 'uf': estado_sigla, 'cidade': cidade, 'categoria': 'farmaceutico', 'nome': nome_pesquisa, 'captcha': valor_captcha, 'search': '1'}
                 resp_post = session.post("https://site.cff.org.br/farmaceutico/pesquisar", data=payload, timeout=20)
+                texto_pagina = resp_post.text.lower()
+                soup_post = BeautifulSoup(resp_post.text, 'html.parser')
                 
-                if "captcha está incorreto" in resp_post.text.lower() or "favor informar os campos" in resp_post.text.lower():
+                if "captcha está incorreto" in texto_pagina or "inválido" in texto_pagina:
                     tentativa_atual += 1
                     continue
                 
-                soup_resultado = BeautifulSoup(resp_post.text, 'html.parser')
-                sucesso_busca = True
-                break 
+                if "favor informar os campos obrigatórios" in texto_pagina:
+                    tentativa_atual += 1
+                    continue
+
+                if "não foi possível encontrar um profissional" in texto_pagina:
+                    break 
+                
+                registros = soup_post.find_all("div", class_="team-info")
+                if registros:
+                    encontrou_profissional = True
+                    soup_resultado = soup_post
+                    break
+                    
+                tentativa_atual += 1
+                
             except:
                 tentativa_atual += 1
                 time.sleep(1)
             
-        if not sucesso_busca or not soup_resultado:
+        if tentativa_atual >= 5:
+            ui_alerts.warning(f"⚠️ Pulei a cidade de {cidade.upper()} porque o site não respondeu ou o captcha falhou 5 vezes.")
             continue
 
-        registros = soup_resultado.find_all("div", class_="team-info")
-        if registros:
+        if encontrou_profissional and soup_resultado:
             profissionais_encontrados = []
-            for r in registros:
+            for r in soup_resultado.find_all("div", class_="team-info"):
                 linhas = [l.strip() for l in r.text.split("\n") if l.strip()]
                 if len(linhas) >= 2:
                     raw_nome = linhas[0].strip().upper()
@@ -219,7 +242,6 @@ def buscar_profissional_por_raio(nome_pesquisa, estado_sigla, cidade_referencia,
                     })
 
             if os.path.exists(caminho_img_temp): os.remove(caminho_img_temp)
-            # Retorna imediatamente ao achar o profissional!
             return profissionais_encontrados, "Sucesso"
 
     if os.path.exists(caminho_img_temp): os.remove(caminho_img_temp)
@@ -231,7 +253,7 @@ def buscar_profissional_por_raio(nome_pesquisa, estado_sigla, cidade_referencia,
 # =======================================================
 st.set_page_config(page_title="Radar CFF", page_icon="📡")
 
-st.title("📡 Radar CFF: Busca por Proximidade")
+st.title("Busca por Região")
 st.write("Insira o nome exato e a cidade base. O robô varrerá a região em formato de raio (do mais próximo ao mais distante).")
 
 col1, col2, col3 = st.columns([1, 2, 2])
@@ -242,16 +264,15 @@ with col2:
 with col3:
     nome_input = st.text_input("Nome Exato do Farmacêutico:").upper()
 
-if st.button("Iniciar Varredura 🚀"):
+if st.button("Buscar"):
     if not estado_input or not cidade_input or not nome_input:
-        st.warning("⚠️ Preencha todos os campos para ligar o radar.")
+        st.warning("⚠️ Preencha todos os campos para prosseguir.")
     else:
-        # Cria um container vazio para atualizar o status sem piscar a tela
         status_container = st.empty()
+        alerts_container = st.container()
         
-        resultados, msg = buscar_profissional_por_raio(nome_input, estado_input, cidade_input, status_container)
+        resultados, msg = buscar_profissional_por_raio(nome_input, estado_input, cidade_input, status_container, alerts_container)
         
-        # Limpa o status de carregamento no final
         status_container.empty()
         
         if resultados:
