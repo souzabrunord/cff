@@ -32,17 +32,18 @@ UF_CODES = {
     'RO': 11, 'RR': 14, 'SC': 42, 'SP': 35, 'SE': 28, 'TO': 17
 }
 
-# ---------------- CACHE DO MAPA (BAIXA SÓ 1 VEZ) ----------------
+# ---------------- CACHE DO MAPA (LEITURA LOCAL) ----------------
 @st.cache_data(show_spinner=False)
 def carregar_mapa_ibge():
+    caminho_arquivo = "municipios.json"
+    
     try:
-        resp = requests.get("https://raw.githubusercontent.com/kelvins/Municipios-Brasileiros/main/json/municipios.json", timeout=15)
-        if resp.status_code == 200:
-            return resp.json()
+        with open(caminho_arquivo, "r", encoding="utf-8-sig") as f:
+            return json.load(f)
+    except Exception as e:
+        st.error(f"❌ Erro ao carregar mapa local: {str(e)}")
         return None
-    except:
-        return None
-
+        
 # ---------------- FUNÇÕES DE DISTÂNCIA E ORDENAÇÃO ----------------
 def remover_acentos(txt):
     return unicodedata.normalize('NFKD', str(txt)).encode('ASCII', 'ignore').decode('ASCII').upper().strip()
